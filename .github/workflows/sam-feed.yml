@@ -6,6 +6,8 @@ on:
   schedule:
     - cron: "30 11 * * *" # 11:30 UTC, after SAM.gov's nightly extract
   workflow_dispatch: # "Run workflow" button, for a manual refresh
+  push:
+    branches: [main] # a code change republishes the feed at once
 
 permissions:
   contents: read

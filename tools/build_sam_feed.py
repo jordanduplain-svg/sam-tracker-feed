@@ -72,9 +72,18 @@ def build(csv_path: Path, today: date) -> list[dict[str, str]]:
             continue
         if not is_still_open(row.get("ResponseDeadLine") or "", row.get("ArchiveDate") or "", today):
             continue
-        offers.append(to_offer(row))
-    offers.sort(key=lambda o: o.get("posted", ""), reverse=True)
-    return offers
+        offers.append((clean(row.get("Sol#")).upper(), to_offer(row)))
+    offers.sort(key=lambda pair: pair[1].get("posted", ""), reverse=True)
+    # The CSV has one row per version of a notice (each amendment is a new row with the
+    # same solicitation number): keep the newest one, as sam.gov's own search does.
+    latest, seen = [], set()
+    for sol, offer in offers:
+        key = (sol, offer.get("organization", ""))
+        if sol and key in seen:
+            continue
+        seen.add(key)
+        latest.append(offer)
+    return latest
 
 
 def main() -> None:

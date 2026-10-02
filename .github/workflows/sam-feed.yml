@@ -1,5 +1,6 @@
 # Every morning: download SAM.gov's public daily CSV, keep the open notices and
 # publish them on GitHub Pages as sam.json, the file the browser extension reads.
+# Then check that the other sources still answer (a failure sends GitHub's e-mail).
 name: SAM.gov feed
 
 on:
@@ -36,3 +37,16 @@ jobs:
           path: site
       - id: deploy
         uses: actions/deploy-pages@v4
+
+  check-sources:
+    # Separate job: a broken source does not stop the SAM.gov feed from being published.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check sources
+        run: python tools/check_sources.py

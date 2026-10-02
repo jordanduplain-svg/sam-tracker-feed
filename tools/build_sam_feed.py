@@ -13,7 +13,7 @@ import csv
 import json
 import sys
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,6 +29,12 @@ OPEN_TYPES = {
     "Sources Sought",
     "Special Notice",
 }
+# Notice types that end an opportunity: posted after an open notice of the same
+# solicitation, they mean it was awarded (or given without competition).
+CLOSING_TYPES = {"Award Notice", "Justification", "Justification and Approval (J&A)"}
+# Except for solicitations open for years (on-ramps of multi-award contracts):
+# they keep publishing awards while still taking offers.
+LONG_RUNNING = timedelta(days=180)
 # Enough text for the keywords; keeps the file small enough for the extension.
 MAX_DESCRIPTION = 3000
 FEED_VERSION = 1
@@ -65,14 +71,21 @@ def to_offer(row: dict[str, str]) -> dict[str, str]:
 
 def build(csv_path: Path, today: date) -> list[dict[str, str]]:
     offers = []
+    closed_on: dict[tuple[str, str], str] = {}  # (sol#, organization) -> last award / justification posted
     for row in csv.DictReader(_lines(csv_path)):
         if not (row.get("NoticeId") or "").strip() or row.get("Active") != "Yes":
             continue
-        if clean(row.get("Type")) not in OPEN_TYPES or parse_date(row.get("PostedDate") or "") is None:
+        if parse_date(row.get("PostedDate") or "") is None:
+            continue
+        kind, sol = clean(row.get("Type")), clean(row.get("Sol#")).upper()
+        if kind in CLOSING_TYPES and sol:
+            key = (sol, to_offer(row).get("organization", ""))
+            closed_on[key] = max(closed_on.get(key, ""), clean(row.get("PostedDate")))
+        if kind not in OPEN_TYPES:
             continue
         if not is_still_open(row.get("ResponseDeadLine") or "", row.get("ArchiveDate") or "", today):
             continue
-        offers.append((clean(row.get("Sol#")).upper(), to_offer(row)))
+        offers.append((sol, to_offer(row)))
     offers.sort(key=lambda pair: pair[1].get("posted", ""), reverse=True)
     # The CSV has one row per version of a notice (each amendment is a new row with the
     # same solicitation number): keep the newest one, as sam.gov's own search does.
@@ -82,8 +95,15 @@ def build(csv_path: Path, today: date) -> list[dict[str, str]]:
         if sol and key in seen:
             continue
         seen.add(key)
+        if sol and closed_on.get(key, "") > offer.get("posted", "") and not long_running(offer, today):
+            continue  # awarded since: no longer open, although its own deadline has not passed
         latest.append(offer)
     return latest
+
+
+def long_running(offer: dict[str, str], today: date) -> bool:
+    due = parse_date(offer.get("deadline", ""))
+    return due is not None and due - today > LONG_RUNNING
 
 
 def main() -> None:

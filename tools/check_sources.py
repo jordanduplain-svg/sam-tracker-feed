@@ -4,8 +4,8 @@ Each check asks the source for what the extension needs (the same fields, open
 opportunities only) and fails if it errors, if a field is gone or if nothing is open.
 Run by .github/workflows/sam-feed.yml: a failed run sends GitHub's usual e-mail.
 
-Texas ESBD is not checked: its robots.txt turns robots away, and a daily automated
-request from GitHub would be one. SAM.gov is checked by the feed build itself.
+Texas ESBD is checked with one request a day (the first page of open solicitations),
+the lightest possible look. SAM.gov is checked by the feed build itself.
 
     python tools/check_sources.py
 """
@@ -52,6 +52,8 @@ SOCRATA = {
 SUBNET_URL = ("https://legacy.sba.gov/federal-contracting/contracting-guide/prime-subcontracting/"
               "subcontracting-opportunities?state=All&page=0")
 USASPENDING_URL = "https://api.usaspending.gov/api/v2/references/toptier_agencies/"
+ESBD_URL = "https://www.txsmartbuy.gov/app/extensions/CPA/CPAMain/1.0.0/services/ESBD.Service.ss"
+ESBD_FIELDS = ("solicitationId", "title", "agencyName", "responseDue", "postingDate", "nigpCodes")
 
 
 def get(url: str) -> bytes:
@@ -76,6 +78,21 @@ def check_subnet() -> str:
     return f"{count} on the first page"
 
 
+def check_esbd() -> str:
+    """First page of posted solicitations, as the extension asks for it (lib/sources/esbd.js)."""
+    body = json.dumps({"lines": [], "page": 1, "status": "1", "urlRoot": "esbd"}).encode()
+    request = urllib.request.Request(ESBD_URL, data=body, headers={**HEADERS, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=60) as resp:
+        data = json.loads(resp.read())
+    lines = data.get("lines") or []
+    if not lines:
+        raise RuntimeError("no open solicitation (service changed?)")
+    missing = [f for f in ESBD_FIELDS if f not in lines[0]]
+    if missing:
+        raise RuntimeError(f"fields gone: {', '.join(missing)}")
+    return f"{data.get('totalRecordsFound', len(lines))} open"
+
+
 def check_usaspending() -> str:
     agencies = json.loads(get(USASPENDING_URL)).get("results", [])
     if not agencies:
@@ -86,6 +103,7 @@ def check_usaspending() -> str:
 def main() -> None:
     checks = {name: (lambda a=args: check_socrata(*a)) for name, args in SOCRATA.items()}
     checks["SBA SUBNet"] = check_subnet
+    checks["Texas ESBD"] = check_esbd
     checks["USAspending (past awards)"] = check_usaspending
 
     lines, failed = [], []

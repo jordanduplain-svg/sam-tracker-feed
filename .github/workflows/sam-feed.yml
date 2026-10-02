@@ -1,5 +1,6 @@
 # Every morning: download SAM.gov's public daily CSV, keep the open notices and
-# publish them on GitHub Pages as sam.json, the file the browser extension reads.
+# publish them on GitHub Pages as sam-v2.json, the file the browser extension reads
+# (and sam.json, the older format, for extensions 0.3.x not updated yet).
 # Then check that the other sources still answer (a failure sends GitHub's e-mail).
 name: SAM.gov feed
 

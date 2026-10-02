@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 import urllib.request
@@ -37,7 +38,7 @@ CLOSING_TYPES = {"Award Notice", "Justification", "Justification and Approval (J
 LONG_RUNNING = timedelta(days=180)
 # Enough text for the keywords; keeps the file small enough for the extension.
 MAX_DESCRIPTION = 3000
-FEED_VERSION = 1
+V2_NAME = "sam-v2.json"  # format 2, written next to sam.json (format 1)
 
 
 def download(url: str, dest: Path) -> None:
@@ -69,20 +70,32 @@ def to_offer(row: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in offer.items() if v}  # empty fields left out to save space
 
 
-def build(csv_path: Path, today: date) -> list[dict[str, str]]:
+def stable_id(sol: str, organization: str) -> str:
+    """Id of an opportunity that stays the same through its amendments (each one is a new
+    NoticeId): from its solicitation number and organization. "s" + 16 hex digits."""
+    return "s" + hashlib.sha1(f"{sol}|{organization}".encode()).hexdigest()[:16]
+
+
+def build(csv_path: Path, today: date) -> list[dict]:
+    """Open opportunities, newest version of each. Each offer has "id" (its NoticeId) and,
+    when it has a solicitation number, "group" (stable_id) and "former" (the NoticeIds of
+    its other open versions, the ids an older extension or feed knew it by)."""
     offers = []
     closed_on: dict[tuple[str, str], str] = {}  # (sol#, organization) -> last award / justification posted
+    versions: dict[tuple[str, str], set[str]] = {}  # (sol#, organization) -> NoticeIds of its open-type rows
     for row in csv.DictReader(_lines(csv_path)):
         if not (row.get("NoticeId") or "").strip() or row.get("Active") != "Yes":
             continue
         if parse_date(row.get("PostedDate") or "") is None:
             continue
         kind, sol = clean(row.get("Type")), clean(row.get("Sol#")).upper()
+        key = (sol, to_offer(row).get("organization", ""))
         if kind in CLOSING_TYPES and sol:
-            key = (sol, to_offer(row).get("organization", ""))
             closed_on[key] = max(closed_on.get(key, ""), clean(row.get("PostedDate")))
         if kind not in OPEN_TYPES:
             continue
+        if sol:
+            versions.setdefault(key, set()).add(row["NoticeId"].strip())
         if not is_still_open(row.get("ResponseDeadLine") or "", row.get("ArchiveDate") or "", today):
             continue
         offers.append((sol, to_offer(row)))
@@ -97,8 +110,28 @@ def build(csv_path: Path, today: date) -> list[dict[str, str]]:
         seen.add(key)
         if sol and closed_on.get(key, "") > offer.get("posted", "") and not long_running(offer, today):
             continue  # awarded since: no longer open, although its own deadline has not passed
+        if sol:
+            offer["group"] = stable_id(*key)
+            former = sorted(versions.get(key, set()) - {offer["id"]})
+            if former:
+                offer["former"] = former
         latest.append(offer)
     return latest
+
+
+def feed_v1(offers: list[dict]) -> list[dict]:
+    """Format 1 (extension 0.3.x, sam.json): id = the NoticeId of the newest version."""
+    return [{k: v for k, v in o.items() if k not in ("group", "former")} for o in offers]
+
+
+def feed_v2(offers: list[dict]) -> list[dict]:
+    """Format 2 (extension 0.4+, sam-v2.json): id = stable through amendments, notice = the
+    NoticeId for the link, former = NoticeIds of older versions (to move kept offers over)."""
+    out = []
+    for o in offers:
+        rest = {k: v for k, v in o.items() if k not in ("id", "group")}
+        out.append({"id": o.get("group") or o["id"], "notice": o["id"], **rest})
+    return out
 
 
 def long_running(offer: dict[str, str], today: date) -> bool:
@@ -122,13 +155,12 @@ def main() -> None:
         sys.exit(f"Only {len(offers)} open notices found, feed not updated.")
 
     opts.out.parent.mkdir(parents=True, exist_ok=True)
-    feed = {
-        "version": FEED_VERSION,
-        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "offers": offers,
-    }
-    opts.out.write_text(json.dumps(feed, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    print(f"{len(offers)} open notices -> {opts.out} ({opts.out.stat().st_size / 1e6:.1f} MB)")
+    generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Both formats are published while extensions 0.3.x may still be installed.
+    for path, version, items in ((opts.out, 1, feed_v1(offers)), (opts.out.with_name(V2_NAME), 2, feed_v2(offers))):
+        feed = {"version": version, "generated": generated, "offers": items}
+        path.write_text(json.dumps(feed, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        print(f"{len(items)} open notices -> {path} ({path.stat().st_size / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":
